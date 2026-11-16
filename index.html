@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Word Route — write a word, ride it</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -11,9 +11,10 @@
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--ink);color:var(--txt);
     font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-  #app{display:flex;flex-direction:column;height:100vh;height:100dvh}
-  #map{flex:1;min-height:0;background:#dfe5ea}
-  #top{position:absolute;z-index:1000;top:10px;left:54px;right:10px;display:flex;gap:6px;max-width:420px}
+  html,body{overflow:hidden}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column}
+  #map{flex:1;min-height:160px;background:#dfe5ea}
+  #top{position:absolute;z-index:1000;top:max(10px,env(safe-area-inset-top));left:54px;right:10px;display:flex;gap:6px;max-width:420px}
   #top input{flex:1;min-width:0}
   input[type=text],input[type=search]{background:#fff;color:#111;border:0;border-radius:10px;padding:10px 12px;font-size:16px;
     box-shadow:0 2px 10px rgba(0,0,0,.25)}
@@ -23,7 +24,7 @@
   button:disabled{opacity:.45;cursor:default}
   #top button{background:#fff;color:#111;border:0;box-shadow:0 2px 10px rgba(0,0,0,.25)}
   #panel{background:var(--ink);border-top:1px solid var(--line);padding:10px 12px calc(10px + env(safe-area-inset-bottom));
-    display:grid;gap:9px;max-width:100%}
+    display:grid;gap:9px;max-width:100%;max-height:60%;overflow-y:auto;flex:none}
   .row{display:flex;gap:8px;align-items:center}
   #word{flex:1;min-width:0;font-weight:800;letter-spacing:.12em;text-transform:uppercase;box-shadow:none}
   .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;flex:none}
@@ -38,9 +39,11 @@
   .grow{flex:1}
   .handle{width:34px;height:34px;border-radius:50%;background:var(--ink);color:#fff;display:grid;place-items:center;
     font-size:18px;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.4)}
-  @media (min-width:860px){
+  @media (min-width:860px), (orientation:landscape) and (min-width:560px){
     #app{flex-direction:row-reverse}
-    #panel{width:360px;border-top:0;border-right:1px solid var(--line);align-content:start;padding:18px}
+    #map{min-height:0}
+    #panel{width:min(360px,45vw);max-height:none;border-top:0;border-right:1px solid var(--line);align-content:start;padding:18px;
+      padding-left:max(18px,env(safe-area-inset-left))}
     #top{left:auto;right:14px}
   }
 </style>
@@ -221,8 +224,9 @@ function distPointSeg(px, py, ax, ay, bx, by) {
 // Dijkstra. With seg=[ax,ay,bx,by] edges are penalised by their distance from that ideal line,
 // so the path hugs the letter stroke instead of taking the shortest way.
 function shortest(g, src, dst, seg, sigma, cutoff) {
-  const { X, Y, off, to, len, dist, prev, stamp } = g, T = ++g.tick;
-  const hk = [0], hn = [src];
+  const { X, Y, off, to, len, dist, prev, stamp } = g, T = ++g.tick, tx = X[dst], ty = Y[dst];
+  const h = v => Math.hypot(X[v] - tx, Y[v] - ty);
+  const hk = [h(src)], hn = [src];
   dist[src] = 0; prev[src] = -1; stamp[src] = T;
   while (hn.length) {
     const d = hk[0], u = hn[0], lk = hk.pop(), ln = hn.pop();
@@ -232,8 +236,9 @@ function shortest(g, src, dst, seg, sigma, cutoff) {
         if (hk[c] >= lk) break; hk[i] = hk[c]; hn[i] = hn[c]; i = c; }
       hk[i] = lk; hn[i] = ln;
     }
-    if (d > dist[u]) continue;
+    if (d > dist[u] + h(u) + 1e-6) continue;
     if (u === dst) break;
+    const du = dist[u];
     for (let e = off[u]; e < off[u + 1]; e++) {
       const v = to[e]; let w = len[e];
       if (seg) {
@@ -241,12 +246,13 @@ function shortest(g, src, dst, seg, sigma, cutoff) {
         if (dv > cutoff) continue;
         const q = dv / sigma; w *= 1 + q * q;
       }
-      const nd = d + w;
+      const nd = du + w;
       if (stamp[v] !== T || nd < dist[v]) {
         stamp[v] = T; dist[v] = nd; prev[v] = u;
-        let i = hn.length; hk.push(nd); hn.push(v); // sift up
-        while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= nd) break; hk[i] = hk[p]; hn[i] = hn[p]; i = p; }
-        hk[i] = nd; hn[i] = v;
+        const f = nd + h(v);
+        let i = hn.length; hk.push(f); hn.push(v); // sift up
+        while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= f) break; hk[i] = hk[p]; hn[i] = hn[p]; i = p; }
+        hk[i] = f; hn[i] = v;
       }
     }
   }
@@ -308,8 +314,8 @@ const gx2lon = gx => gx / WORLD * 360 - 180;
 const gy2lat = gy => Math.atan(Math.sinh(Math.PI * (1 - 2 * gy / WORLD))) / RAD;
 // lines: arrays of [gx,gy] integer points. Joins lines that touch without sharing a vertex
 // (tile edges, simplified junctions) and returns way elements for buildGraph.
-function linesToElements(lines) {
-  const K = 67108864, CELL = 256, TOL = 2, grid = new Map(), seen = new Map();
+function linesToElements(lines, TOL = 2) {
+  const K = 67108864, CELL = 256 * Math.max(1, TOL / 2), grid = new Map(), seen = new Map();
   for (const ln of lines) for (let i = 0; i < ln.length; i++) {
     const p = ln[i]; seen.set(p[0] * K + p[1], p);
     if (!i) continue;
@@ -387,7 +393,7 @@ function drawRoute() {
 }
 
 // Streets come from OpenFreeMap vector tiles (OpenStreetMap data, zoom 14).
-let tileLibs, tileURL;
+let tileLibs, tileURL; const tileCache = new Map();
 function wanted(p, mode) {
   const c = p.class, sub = p.subclass;
   if (c === "primary" || c === "secondary" || c === "tertiary" || c === "minor" || c === "track") return true;
@@ -400,27 +406,40 @@ async function fetchRoads(b, mode) {
     tileLibs = { VectorTile: vt.VectorTile, Pbf: pbf.default };
   }
   if (!tileURL) tileURL = (await (await fetch("https://tiles.openfreemap.org/planet")).json()).tiles[0];
-  const lat2y = lat => { const r = lat * RAD; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 16384; };
-  const x0 = Math.floor((b.w + 180) / 360 * 16384), x1 = Math.floor((b.e + 180) / 360 * 16384);
-  const y0 = Math.floor(lat2y(b.n)), y1 = Math.floor(lat2y(b.s));
+  // Small words use full-detail zoom-14 tiles; big words drop to zoom 13/12, which keep the
+  // through roads and skip the tiny alleys (plenty for letters several km tall).
+  let z, x0, x1, y0, y1;
+  for (z = 14; z >= 12; z--) {
+    const n = 2 ** z, lat2y = lat => { const r = lat * RAD; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n; };
+    x0 = Math.floor((b.w + 180) / 360 * n); x1 = Math.floor((b.e + 180) / 360 * n);
+    y0 = Math.floor(lat2y(b.n)); y1 = Math.floor(lat2y(b.s));
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 16) break;
+  }
+  if (z < 12) throw new Error("too big");
+  const scale = 4096 * 2 ** (14 - z), lines = [];
   const jobs = [];
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push([x, y]);
-  if (jobs.length > 24) throw new Error("too big");
-  const lines = [];
   await Promise.all(jobs.map(async ([x, y]) => {
-    const res = await fetch(tileURL.replace("{z}", 14).replace("{x}", x).replace("{y}", y));
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const layer = new tileLibs.VectorTile(new tileLibs.Pbf(new Uint8Array(await res.arrayBuffer()))).layers.transportation;
+    const key = z + "/" + x + "/" + y;
+    let buf = tileCache.get(key);
+    if (!buf) {
+      const res = await fetch(tileURL.replace("{z}", z).replace("{x}", x).replace("{y}", y));
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      buf = new Uint8Array(await res.arrayBuffer());
+      if (tileCache.size > 60) tileCache.delete(tileCache.keys().next().value);
+      tileCache.set(key, buf);
+    }
+    const layer = new tileLibs.VectorTile(new tileLibs.Pbf(buf)).layers.transportation;
     if (!layer) return;
-    const k = 4096 / layer.extent;
+    const k = scale / layer.extent;
     for (let i = 0; i < layer.length; i++) {
       const f = layer.feature(i);
       if (f.type !== 2 || !wanted(f.properties, mode)) continue;
-      for (const g of f.loadGeometry()) lines.push(g.map(q => [Math.round(x * 4096 + q.x * k), Math.round(y * 4096 + q.y * k)]));
+      for (const g of f.loadGeometry()) lines.push(g.map(q => [Math.round(x * scale + q.x * k), Math.round(y * scale + q.y * k)]));
     }
   }));
-  return { elements: linesToElements(lines),
-    box: { w: gx2lon(x0 * 4096), e: gx2lon((x1 + 1) * 4096), n: gy2lat(y0 * 4096), s: gy2lat((y1 + 1) * 4096) } };
+  return { elements: linesToElements(lines, 2 * 2 ** (14 - z)),
+    box: { w: gx2lon(x0 * scale), e: gx2lon((x1 + 1) * scale), n: gy2lat(y0 * scale), s: gy2lat((y1 + 1) * scale) } };
 }
 
 // Route with what is loaded; returns false if road data is missing for this placement.
@@ -442,6 +461,7 @@ async function make() {
   if (!routeNow()) {
     const box = boxOf(strokes, margin() + 100);
     state.busy = true; $("go").disabled = true; setStatus("Loading streets from OpenStreetMap…");
+    await new Promise(r => setTimeout(r, 30));
     try {
       const data = await fetchRoads(box, state.mode);
       const g = buildGraph(data.elements);
@@ -453,6 +473,8 @@ async function make() {
         : e.message === "too big" ? "That covers too large an area. Use smaller letters or a shorter word."
         : "Couldn't load street data (" + e.message + "). Try again in a moment.", true);
     }
+    setStatus("Tracing the letters…");
+    await new Promise(r => setTimeout(r, 30));
     state.busy = false; $("go").disabled = false;
     routeNow();
   }
@@ -465,7 +487,7 @@ async function tune() {
   state.busy = true; $("tune").disabled = true; $("go").disabled = true;
   const lay = layoutWord($("word").value), h = H(), step = Math.min(h * 0.1, 120), c0 = state.center, r0 = ROT();
   const cl = Math.cos(c0.lat * RAD);
-  let best = { score: state.result.score, c: c0, rot: r0, res: state.result }, i = 0;
+  let best = { score: state.result.score, c: c0, rot: r0, res: state.result }, i = 0; const t0 = performance.now();
   const cands = [];
   for (const dr of [0, -3, 3, -6, 6]) for (const dx of [0, -1, 1]) for (const dy of [0, -1, 1]) if (dr || dx || dy) cands.push([dr, dx, dy]);
   for (const [dr, dx, dy] of cands) {
@@ -476,7 +498,9 @@ async function tune() {
       const res = routeWord(state.graph, strokes, h);
       if (res && res.score < best.score) best = { score: res.score, c, rot, res };
     }
-    if (++i % 4 === 0) { setStatus("Trying nearby placements… " + Math.round(i / cands.length * 100) + "%"); await new Promise(r => setTimeout(r)); }
+    setStatus("Trying nearby placements… " + Math.round(++i / cands.length * 100) + "%");
+    await new Promise(r => setTimeout(r));
+    if (performance.now() - t0 > 20000) break;
   }
   const gain = state.result.score - best.score;
   state.center = best.c; handle.setLatLng(best.c); $("rot").value = best.rot; state.result = best.res;
