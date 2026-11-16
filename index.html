@@ -302,14 +302,42 @@ function toGPX(g, parts, name) {
   }
   return out + "</trkseg></trk>\n</gpx>\n";
 }
+// ---------- street data from vector tiles ----------
+const WORLD = 16384 * 4096; // global pixel grid at zoom 14, 4096 units per tile
+const gx2lon = gx => gx / WORLD * 360 - 180;
+const gy2lat = gy => Math.atan(Math.sinh(Math.PI * (1 - 2 * gy / WORLD))) / RAD;
+// lines: arrays of [gx,gy] integer points. Joins lines that touch without sharing a vertex
+// (tile edges, simplified junctions) and returns way elements for buildGraph.
+function linesToElements(lines) {
+  const K = 67108864, CELL = 256, TOL = 2, grid = new Map(), seen = new Map();
+  for (const ln of lines) for (let i = 0; i < ln.length; i++) {
+    const p = ln[i]; seen.set(p[0] * K + p[1], p);
+    if (!i) continue;
+    const a = ln[i - 1]; if (a[0] === p[0] && a[1] === p[1]) continue;
+    const x0 = Math.floor((Math.min(a[0], p[0]) - TOL) / CELL), x1 = Math.floor((Math.max(a[0], p[0]) + TOL) / CELL);
+    const y0 = Math.floor((Math.min(a[1], p[1]) - TOL) / CELL), y1 = Math.floor((Math.max(a[1], p[1]) + TOL) / CELL);
+    for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
+      const k = cx + "," + cy; let g = grid.get(k); if (!g) grid.set(k, g = []); g.push([a, p]);
+    }
+  }
+  const out = lines.slice();
+  for (const p of seen.values()) {
+    const segs = grid.get(Math.floor(p[0] / CELL) + "," + Math.floor(p[1] / CELL)); if (!segs) continue;
+    for (const [a, b] of segs) {
+      if ((a[0] === p[0] && a[1] === p[1]) || (b[0] === p[0] && b[1] === p[1])) continue;
+      if (distPointSeg(p[0], p[1], a[0], a[1], b[0], b[1]) <= TOL) out.push([a, p, b]);
+    }
+  }
+  return out.map(ln => ({ type: "way", nodes: ln.map(q => q[0] * K + q[1]), geometry: ln.map(q => ({ lat: gy2lat(q[1]), lon: gx2lon(q[0]) })) }));
+}
 /*CORE-END*/
 
 // ---------- page ----------
 const $ = id => document.getElementById(id);
 const map = L.map("map", { zoomControl: true }).setView([37.9755, 23.7348], 14);
-L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-  maxZoom: 19, subdomains: "abcd",
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 
 const state = { center: map.getCenter(), mode: "run", graph: null, graphBox: null, graphMode: null, result: null, busy: false };
@@ -358,23 +386,41 @@ function drawRoute() {
   drawGhost();
 }
 
-const HW = {
-  bike: "primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|cycleway|track|path",
-  run: "primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|cycleway|track|path|pedestrian|footway|steps"
-};
-const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.private.coffee/api/interpreter"];
+// Streets come from OpenFreeMap vector tiles (OpenStreetMap data, zoom 14).
+let tileLibs, tileURL;
+function wanted(p, mode) {
+  const c = p.class, sub = p.subclass;
+  if (c === "primary" || c === "secondary" || c === "tertiary" || c === "minor" || c === "track") return true;
+  if (c === "path") return mode === "run" ? sub !== "platform" : (sub === "cycleway" || sub === "path" || sub === "pedestrian");
+  return false;
+}
 async function fetchRoads(b, mode) {
-  const extra = mode === "run" ? '["footway"!~"^(sidewalk|crossing)$"]' : "";
-  const q = `[out:json][timeout:60];way["highway"~"^(${HW[mode]})$"]["area"!="yes"]["access"!~"^(private|no)$"]${extra}(${b.s},${b.w},${b.n},${b.e});out geom qt;`;
-  let lastErr;
-  for (const url of OVERPASS) {
-    try {
-      const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(q), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return (await res.json()).elements || [];
-    } catch (e) { lastErr = e; }
+  if (!tileLibs) {
+    const [vt, pbf] = await Promise.all([import("https://esm.sh/@mapbox/vector-tile@1.3.1"), import("https://esm.sh/pbf@3.2.1")]);
+    tileLibs = { VectorTile: vt.VectorTile, Pbf: pbf.default };
   }
-  throw lastErr;
+  if (!tileURL) tileURL = (await (await fetch("https://tiles.openfreemap.org/planet")).json()).tiles[0];
+  const lat2y = lat => { const r = lat * RAD; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 16384; };
+  const x0 = Math.floor((b.w + 180) / 360 * 16384), x1 = Math.floor((b.e + 180) / 360 * 16384);
+  const y0 = Math.floor(lat2y(b.n)), y1 = Math.floor(lat2y(b.s));
+  const jobs = [];
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push([x, y]);
+  if (jobs.length > 24) throw new Error("too big");
+  const lines = [];
+  await Promise.all(jobs.map(async ([x, y]) => {
+    const res = await fetch(tileURL.replace("{z}", 14).replace("{x}", x).replace("{y}", y));
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const layer = new tileLibs.VectorTile(new tileLibs.Pbf(new Uint8Array(await res.arrayBuffer()))).layers.transportation;
+    if (!layer) return;
+    const k = 4096 / layer.extent;
+    for (let i = 0; i < layer.length; i++) {
+      const f = layer.feature(i);
+      if (f.type !== 2 || !wanted(f.properties, mode)) continue;
+      for (const g of f.loadGeometry()) lines.push(g.map(q => [Math.round(x * 4096 + q.x * k), Math.round(y * 4096 + q.y * k)]));
+    }
+  }));
+  return { elements: linesToElements(lines),
+    box: { w: gx2lon(x0 * 4096), e: gx2lon((x1 + 1) * 4096), n: gy2lat(y0 * 4096), s: gy2lat((y1 + 1) * 4096) } };
 }
 
 // Route with what is loaded; returns false if road data is missing for this placement.
@@ -394,18 +440,18 @@ async function make() {
   const { lay, strokes } = currentStrokes();
   if (!strokes.length) return setStatus("Type a word first (A–Z, Α–Ω, 0–9, ♥).", true);
   if (!routeNow()) {
-    const box = boxOf(strokes, margin() + 400);
-    const km2 = (box.n - box.s) * RAD * R * (box.e - box.w) * RAD * R * Math.cos(box.s * RAD) / 1e6;
-    if (km2 > 60) return setStatus("That covers " + Math.round(km2) + " km² — too much street data. Use smaller letters or a shorter word.", true);
+    const box = boxOf(strokes, margin() + 100);
     state.busy = true; $("go").disabled = true; setStatus("Loading streets from OpenStreetMap…");
     try {
-      const els = await fetchRoads(box, state.mode);
-      const g = buildGraph(els);
+      const data = await fetchRoads(box, state.mode);
+      const g = buildGraph(data.elements);
       if (!g) throw new Error("no streets");
-      state.graph = g; state.graphBox = box; state.graphMode = state.mode;
+      state.graph = g; state.graphBox = data.box; state.graphMode = state.mode;
     } catch (e) {
       state.busy = false; $("go").disabled = false; clearRoute();
-      return setStatus(e.message === "no streets" ? "No streets found here — move the word onto a city." : "Street data server is busy (" + e.message + "). Try again in a moment.", true);
+      return setStatus(e.message === "no streets" ? "No streets found here — move the word onto a city."
+        : e.message === "too big" ? "That covers too large an area. Use smaller letters or a shorter word."
+        : "Couldn't load street data (" + e.message + "). Try again in a moment.", true);
     }
     state.busy = false; $("go").disabled = false;
     routeNow();
