@@ -56,8 +56,11 @@
     #status{display:block}
     #top{left:auto;right:14px}
   }
-  @media (orientation:landscape) and (max-height:500px){
-    #panel{padding:10px 12px;gap:8px}
+  @media (orientation:landscape) and (max-width:859px){
+    #panel{padding:12px;gap:9px;padding-left:max(12px,env(safe-area-inset-left))}
+    .actions{gap:6px}
+    .actions button{font-size:13px;padding:10px 2px}
+    label{grid-template-columns:66px minmax(0,1fr) 52px}
   }
 </style>
 </head>
@@ -399,7 +402,8 @@ function drawRoute() {
   L.circleMarker([g.lat[end], g.lon[end]], { radius: 7, color: "#fff", weight: 2, fillColor: "#14181f", fillOpacity: 1 }).addTo(routeLayer).bindTooltip("Finish");
   const km = r.length / 1000, mins = state.mode === "run" ? km * 6 : km / 18 * 60;
   const t = mins >= 60 ? Math.floor(mins / 60) + "h " + String(Math.round(mins % 60)).padStart(2, "0") + "m" : Math.round(mins) + " min";
-  $("stats").textContent = km.toFixed(1) + " km · ~" + t + " · avg " + Math.round(r.score) + " m off the letters";
+  $("stats").textContent = km.toFixed(1) + " km · ~" + t + " · ±" + Math.round(r.score) + " m";
+  $("stats").title = "Route follows the letters within " + Math.round(r.score) + " m on average";
   $("gpx").disabled = false; $("tune").disabled = false;
   drawGhost();
 }
